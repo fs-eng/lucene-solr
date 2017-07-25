@@ -29,6 +29,7 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Three concrete implementations for ContentStream - one for File/URL/String
@@ -84,7 +85,11 @@ public abstract class ContentStreamBase implements ContentStream
       contentType = conn.getContentType();
       name = url.toExternalForm();
       size = new Long( conn.getContentLength() );
-      return conn.getInputStream();
+      InputStream is = conn.getInputStream();
+      if( url.getFile().endsWith(".gz") ) {
+          is = new GZIPInputStream(is);
+      }
+      return is;
     }
   }
   
@@ -129,7 +134,11 @@ public abstract class ContentStreamBase implements ContentStream
 
     @Override
     public InputStream getStream() throws IOException {
-      return new FileInputStream( file );
+      InputStream is = new FileInputStream( file );
+      if(name.endsWith(".gz")) {
+        is = new GZIPInputStream(is);
+      }
+      return is;
     }
   }
   
