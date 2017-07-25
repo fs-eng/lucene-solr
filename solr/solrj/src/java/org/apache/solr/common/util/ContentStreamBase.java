@@ -28,7 +28,10 @@ import java.io.StringReader;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
+import java.util.function.Predicate;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -40,12 +43,64 @@ import java.util.zip.GZIPInputStream;
 public abstract class ContentStreamBase implements ContentStream
 {
   public static final String DEFAULT_CHARSET = StandardCharsets.UTF_8.name();
-  
+
+  static final String APPLICATION_XML = "application/xml";
+  static final String APPLICATION_JSON = "application/json";
+  static final String APPLICATION_GZIP = "application/gzip";
+  static final String CONTENT_UNKNOWN = "content/unknown";
+  static final String APPLICATION_OCTET_STREAM = "application/octet-stream";
+  static final String TEXT_CSV = "text/csv";
+  protected static final List<String> UNHELPFUL_TYPES = Arrays.asList(APPLICATION_OCTET_STREAM, APPLICATION_GZIP, CONTENT_UNKNOWN);
+  protected static final List<String> XML_SUF =  Arrays.asList(".xml", ".xml.gz", ".xml.gzip");
+  protected static final List<String> JSON_SUF =  Arrays.asList(".json", ".json.gz", ".json.gzip");
+  protected static final List<String> CSV_SUF =  Arrays.asList(".csv", ".csv.gz", ".csv.gzip");
+
   protected String name;
   protected String sourceInfo;
   protected String contentType;
   protected Long size;
-  
+
+  protected String attemptToDetermineContentType() {
+    String type=null;
+    if(name!=null) {
+      Predicate<String> endsWith = suffix->name.toLowerCase().endsWith(suffix);
+
+      if (XML_SUF.stream().anyMatch(endsWith)) {
+        type = APPLICATION_XML;
+      } else if (JSON_SUF.stream().anyMatch(endsWith)){
+        type = APPLICATION_JSON;
+      } else if (CSV_SUF.stream().anyMatch(endsWith)){
+        type = TEXT_CSV;
+      } else {
+        type = attemptToDetermineTypeFromFirstCharacter();
+      }
+    }
+    return type;
+  }
+
+  private String attemptToDetermineTypeFromFirstCharacter() {
+    String type = null;
+    try (InputStream stream = getStream()) {
+      // Last ditch effort to determine content, if the first non-white space
+      // is a '<' or '{', assume xml or json.
+      int data = stream.read();
+      while ( (data!= -1) && (((char) data) == ' ')) {
+        data = stream.read();
+      }
+      if ((char) data == '<') {
+        type = APPLICATION_XML;
+      }
+      if ((char) data == '{') {
+        type = APPLICATION_JSON;
+      }
+    } catch (Exception ex) {
+      // This code just eats, the exception and leaves
+      // the contentType untouched.
+    }
+    return type;
+  }
+
+
   //---------------------------------------------------------------------
   //---------------------------------------------------------------------
   
@@ -79,15 +134,31 @@ public abstract class ContentStreamBase implements ContentStream
     }
 
     @Override
+    public String getContentType() {
+      // for file:// streams that are octet-streams, try to determine the payload
+      // type from payload rather than just using the mime type.
+      if("file".equals(url.getProtocol())) {
+
+        Predicate<String> equals = mimeType->mimeType.equals(contentType);
+        if(UNHELPFUL_TYPES.stream().anyMatch(equals)){
+          String type = attemptToDetermineContentType();
+          contentType = (type != null) ? type : contentType;
+        }
+      }
+      return contentType;
+    }
+
+    @Override
     public InputStream getStream() throws IOException {
       URLConnection conn = this.url.openConnection();
       
       contentType = conn.getContentType();
       name = url.toExternalForm();
-      size = new Long( conn.getContentLength() );
+      size = conn.getContentLengthLong();
       InputStream is = conn.getInputStream();
-      if( url.getFile().endsWith(".gz") ) {
-          is = new GZIPInputStream(is);
+      String urlFile = url.getFile().toLowerCase();
+      if( "gzip".equals(conn.getContentEncoding()) || urlFile.endsWith( ".gz" ) || urlFile.endsWith( ".gzip" )){
+        is = new GZIPInputStream(is);
       }
       return is;
     }
@@ -112,22 +183,7 @@ public abstract class ContentStreamBase implements ContentStream
     @Override
     public String getContentType() {
       if(contentType==null) {
-        InputStream stream = null;
-        try {
-          stream = new FileInputStream(file);
-          char first = (char)stream.read();
-          if(first == '<') {
-            return "application/xml";
-          }
-          if(first == '{') {
-            return "application/json";
-          }
-        } catch(Exception ex) {
-        } finally {
-          if (stream != null) try {
-            stream.close();
-          } catch (IOException ioe) {}
-        }
+        contentType=attemptToDetermineContentType();
       }
       return contentType;
     }
@@ -135,7 +191,8 @@ public abstract class ContentStreamBase implements ContentStream
     @Override
     public InputStream getStream() throws IOException {
       InputStream is = new FileInputStream( file );
-      if(name.endsWith(".gz")) {
+      String lowerName = name.toLowerCase();
+      if(lowerName.endsWith(".gz") || lowerName.endsWith(".gzip")) {
         is = new GZIPInputStream(is);
       }
       return is;
@@ -149,29 +206,45 @@ public abstract class ContentStreamBase implements ContentStream
   public static class StringStream extends ContentStreamBase
   {
     private final String str;
-    
+
     public StringStream( String str ) {
-      this.str = str; 
-      
-      contentType = null;
+      this(str, detect(str));
+    }
+
+    public StringStream( String str, String contentType ) {
+      this.str = str;
+      this.contentType = contentType;
       name = null;
-      size = new Long( str.length() );
+      try {
+        size = new Long( str.getBytes(DEFAULT_CHARSET).length );
+      } catch (UnsupportedEncodingException e) {
+        // won't happen
+        throw new RuntimeException(e);
+      }
       sourceInfo = "string";
     }
 
-    @Override
-    public String getContentType() {
-      if(contentType==null && str.length() > 0) {
-        char first = str.charAt(0);
-        if(first == '<') {
-          return "application/xml";
+    public static String detect(String str) {
+      String detectedContentType = null;
+      int lim = str.length() - 1;
+      for (int i=0; i<lim; i++) {
+        char ch = str.charAt(i);
+        if (Character.isWhitespace(ch)) {
+          continue;
         }
-        if(first == '{') {
-          return "application/json";
+        // first non-whitespace chars
+        if (ch == '#'                         // single line comment
+            || (ch == '/' && (str.charAt(i + 1) == '/' || str.charAt(i + 1) == '*'))  // single line or multi-line comment
+            || (ch == '{' || ch == '[')       // start of JSON object
+            )
+        {
+          detectedContentType = "application/json";
+        } else if (ch == '<') {
+          detectedContentType = "text/xml";
         }
-        // find a comma? for CSV?
+        break;
       }
-      return contentType;
+      return detectedContentType;
     }
 
     @Override
@@ -250,11 +323,14 @@ public abstract class ContentStreamBase implements ContentStream
   public static class ByteArrayStream extends ContentStreamBase
   {
     private final byte[] bytes;
-    
     public ByteArrayStream( byte[] bytes, String source ) {
-      this.bytes = bytes; 
+      this(bytes,source, null);
+    }
+    
+    public ByteArrayStream( byte[] bytes, String source, String contentType ) {
+      this.bytes = bytes;
       
-      this.contentType = null;
+      this.contentType = contentType;
       name = source;
       size = new Long(bytes.length);
       sourceInfo = source;
