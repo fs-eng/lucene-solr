@@ -1577,7 +1577,14 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
         </mapper>
         <path location="${ant.file}"/>
       </pathconvert>
-      <m2-deploy pom.xml="${pom.xml}"/>
+      <m2-deploy pom.xml="${pom.xml}">
+        <artifact-attachments>
+          <attach file="${build.dir}/${final.name}-src.jar"
+                  classifier="sources"/>
+          <attach file="${build.dir}/${final.name}-javadoc.jar"
+                  classifier="javadoc"/>
+        </artifact-attachments>
+      </m2-deploy>
     </sequential>
   </target>
 
@@ -1593,7 +1600,14 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
         </mapper>
         <path location="${ant.file}"/>
       </pathconvert>
-      <m2-deploy pom.xml="${pom.xml}"/>
+      <m2-deploy pom.xml="${pom.xml}">
+        <artifact-attachments>
+          <attach file="${build.dir}/${final.name}-src.jar"
+                  classifier="sources"/>
+          <attach file="${build.dir}/${final.name}-javadoc.jar"
+                  classifier="javadoc"/>
+        </artifact-attachments>
+      </m2-deploy>
     </sequential>
   </target>
   
