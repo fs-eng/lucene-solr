@@ -28,26 +28,82 @@ import java.io.UnsupportedEncodingException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
+import java.util.function.Predicate;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Three concrete implementations for ContentStream - one for File/URL/String
- * 
+ *
  *
  * @since solr 1.2
  */
 public abstract class ContentStreamBase implements ContentStream
 {
   public static final String DEFAULT_CHARSET = StandardCharsets.UTF_8.name();
-  
+
+  static final String APPLICATION_XML = "application/xml";
+  static final String APPLICATION_JSON = "application/json";
+  static final String APPLICATION_GZIP = "application/gzip";
+  static final String CONTENT_UNKNOWN = "content/unknown";
+  static final String APPLICATION_OCTET_STREAM = "application/octet-stream";
+  static final String TEXT_CSV = "text/csv";
+  protected static final List<String> UNHELPFUL_TYPES = Arrays.asList(APPLICATION_OCTET_STREAM, APPLICATION_GZIP, CONTENT_UNKNOWN);
+  protected static final List<String> XML_SUF =  Arrays.asList(".xml", ".xml.gz", ".xml.gzip");
+  protected static final List<String> JSON_SUF =  Arrays.asList(".json", ".json.gz", ".json.gzip");
+  protected static final List<String> CSV_SUF =  Arrays.asList(".csv", ".csv.gz", ".csv.gzip");
+
   protected String name;
   protected String sourceInfo;
   protected String contentType;
   protected Long size;
-  
+
+  protected String attemptToDetermineContentType() {
+    String type=null;
+    if(name!=null) {
+      Predicate<String> endsWith = suffix->name.toLowerCase().endsWith(suffix);
+
+      if (XML_SUF.stream().anyMatch(endsWith)) {
+        type = APPLICATION_XML;
+      } else if (JSON_SUF.stream().anyMatch(endsWith)){
+        type = APPLICATION_JSON;
+      } else if (CSV_SUF.stream().anyMatch(endsWith)){
+        type = TEXT_CSV;
+      } else {
+        type = attemptToDetermineTypeFromFirstCharacter();
+      }
+    }
+    return type;
+  }
+
+  private String attemptToDetermineTypeFromFirstCharacter() {
+    String type = null;
+    try (InputStream stream = getStream()) {
+      // Last ditch effort to determine content, if the first non-white space
+      // is a '<' or '{', assume xml or json.
+      int data = stream.read();
+      while ( (data!= -1) && (((char) data) == ' ')) {
+        data = stream.read();
+      }
+      if ((char) data == '<') {
+        type = APPLICATION_XML;
+      }
+      if ((char) data == '{') {
+        type = APPLICATION_JSON;
+      }
+    } catch (Exception ex) {
+      // This code just eats, the exception and leaves
+      // the contentType untouched.
+    }
+    return type;
+  }
+
+
   //---------------------------------------------------------------------
   //---------------------------------------------------------------------
-  
+
   public static String getCharsetFromContentType( String contentType )
   {
     if( contentType != null ) {
@@ -58,46 +114,66 @@ public abstract class ContentStreamBase implements ContentStream
     }
     return null;
   }
-  
+
   //------------------------------------------------------------------------
   //------------------------------------------------------------------------
-  
+
   /**
    * Construct a <code>ContentStream</code> from a <code>URL</code>
-   * 
+   *
    * This uses a <code>URLConnection</code> to get the content stream
    * @see  URLConnection
    */
   public static class URLStream extends ContentStreamBase
   {
     private final URL url;
-    
+
     public URLStream( URL url ) {
-      this.url = url; 
+      this.url = url;
       sourceInfo = "url";
+    }
+
+    @Override
+    public String getContentType() {
+      // for file:// streams that are octet-streams, try to determine the payload
+      // type from payload rather than just using the mime type.
+      if("file".equals(url.getProtocol())) {
+
+        Predicate<String> equals = mimeType->mimeType.equals(contentType);
+        if(UNHELPFUL_TYPES.stream().anyMatch(equals)){
+          String type = attemptToDetermineContentType();
+          contentType = (type != null) ? type : contentType;
+        }
+      }
+      return contentType;
     }
 
     @Override
     public InputStream getStream() throws IOException {
       URLConnection conn = this.url.openConnection();
-      
+
       contentType = conn.getContentType();
       name = url.toExternalForm();
-      size = new Long( conn.getContentLength() );
-      return conn.getInputStream();
+      size = conn.getContentLengthLong();
+      InputStream is = conn.getInputStream();
+      String urlFile = url.getFile().toLowerCase();
+      if( "gzip".equals(conn.getContentEncoding()) || urlFile.endsWith( ".gz" ) || urlFile.endsWith( ".gzip" )){
+        is = new GZIPInputStream(is);
+      }
+      return is;
     }
   }
-  
+
   /**
    * Construct a <code>ContentStream</code> from a <code>File</code>
    */
   public static class FileStream extends ContentStreamBase
   {
     private final File file;
-    
+
     public FileStream( File f ) {
-      file = f; 
-      
+      file = f;
+
       contentType = null; // ??
       name = file.getName();
       size = file.length();
@@ -107,33 +183,22 @@ public abstract class ContentStreamBase implements ContentStream
     @Override
     public String getContentType() {
       if(contentType==null) {
-        // TODO: this is buggy... does not allow for whitespace, JSON comments, etc.
-        InputStream stream = null;
-        try {
-          stream = new FileInputStream(file);
-          char first = (char)stream.read();
-          if(first == '<') {
-            return "application/xml";
-          }
-          if(first == '{') {
-            return "application/json";
-          }
-        } catch(Exception ex) {
-        } finally {
-          if (stream != null) try {
-            stream.close();
-          } catch (IOException ioe) {}
-        }
+        contentType=attemptToDetermineContentType();
       }
       return contentType;
     }
 
     @Override
     public InputStream getStream() throws IOException {
-      return new FileInputStream( file );
+      InputStream is = new FileInputStream( file );
+      String lowerName = name.toLowerCase();
+      if(lowerName.endsWith(".gz") || lowerName.endsWith(".gzip")) {
+        is = new GZIPInputStream(is);
+      }
+      return is;
     }
   }
-  
+
 
   /**
    * Construct a <code>ContentStream</code> from a <code>String</code>
@@ -188,28 +253,28 @@ public abstract class ContentStreamBase implements ContentStream
     }
 
     /**
-     * If an charset is defined (by the contentType) use that, otherwise 
+     * If an charset is defined (by the contentType) use that, otherwise
      * use a StringReader
      */
     @Override
     public Reader getReader() throws IOException {
       String charset = getCharsetFromContentType( contentType );
-      return charset == null 
-        ? new StringReader( str )
-        : new InputStreamReader( getStream(), charset );
+      return charset == null
+          ? new StringReader( str )
+          : new InputStreamReader( getStream(), charset );
     }
   }
 
   /**
-   * Base reader implementation.  If the contentType declares a 
+   * Base reader implementation.  If the contentType declares a
    * charset use it, otherwise use "utf-8".
    */
   @Override
   public Reader getReader() throws IOException {
     String charset = getCharsetFromContentType( getContentType() );
-    return charset == null 
-      ? new InputStreamReader( getStream(), DEFAULT_CHARSET )
-      : new InputStreamReader( getStream(), charset );
+    return charset == null
+        ? new InputStreamReader( getStream(), DEFAULT_CHARSET )
+        : new InputStreamReader( getStream(), charset );
   }
 
   //------------------------------------------------------------------
@@ -251,7 +316,7 @@ public abstract class ContentStreamBase implements ContentStream
   public void setSourceInfo(String sourceInfo) {
     this.sourceInfo = sourceInfo;
   }
-  
+
   /**
    * Construct a <code>ContentStream</code> from a <code>File</code>
    */
@@ -261,10 +326,10 @@ public abstract class ContentStreamBase implements ContentStream
     public ByteArrayStream( byte[] bytes, String source ) {
       this(bytes,source, null);
     }
-    
+
     public ByteArrayStream( byte[] bytes, String source, String contentType ) {
-      this.bytes = bytes; 
-      
+      this.bytes = bytes;
+
       this.contentType = contentType;
       name = source;
       size = new Long(bytes.length);
@@ -276,5 +341,5 @@ public abstract class ContentStreamBase implements ContentStream
     public InputStream getStream() throws IOException {
       return new ByteArrayInputStream( bytes );
     }
-  }  
+  }
 }
